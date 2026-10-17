@@ -5,8 +5,9 @@ import unittest
 from pathlib import Path
 
 from palette_core import (
-    CATEGORIES, Settings, SettingsStore, WorkArea,
-    dock_position, fraction_for_top, handle_position, is_inward_pull, nearest_side,
+    CATEGORIES, MAX_NOTES, THEME_PRESETS, Category, Settings, SettingsStore, WorkArea,
+    dock_position, fraction_for_top, handle_position, is_inward_pull, luminance,
+    nearest_side, readable_ink, theme_colors,
 )
 
 
@@ -92,6 +93,60 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(value, Settings())
         self.assertEqual(Settings.from_dict({"y_fraction": 7}).y_fraction, 1)
         self.assertEqual(Settings.from_dict({"y_fraction": -3}).y_fraction, 0)
+
+    def test_existing_settings_keep_position_and_get_default_contents(self):
+        previous = {"side": "left", "y_fraction": .63, "monitor_x": -960,
+                    "monitor_y": 540, "collapsed": True, "auto_hide": True}
+        loaded = Settings.from_dict(previous)
+        for key, value in previous.items():
+            self.assertEqual(getattr(loaded, key), value)
+        self.assertEqual(loaded.notes, CATEGORIES)
+        self.assertEqual(loaded.background, "#fafaf8")
+
+    def test_custom_note_and_theme_survive_round_trip(self):
+        settings = Settings(title="阅读待办", subtitle="", guidance="下次从这里继续",
+                            background="#242b35", accent="#abcdef", notes=(
+                                Category("待办", "#abcdef", "核对实验", "第一行\n第二行 <b>纯文本</b>"),))
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory))
+            store.save(settings)
+            self.assertEqual(store.load(), settings)
+            self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
+
+    def test_empty_notes_remain_empty(self):
+        self.assertEqual(Settings.from_dict({"notes": []}).notes, ())
+
+    def test_invalid_contents_fall_back_without_affecting_docking(self):
+        invalid = Settings.from_dict({"side": "left", "background": "red; injected: yes;",
+                                      "accent": "#123", "title": "   ",
+                                      "notes": [{"color": "url(file:///secret)", "title": "bad"}]})
+        self.assertEqual(invalid.side, "left")
+        self.assertEqual(invalid.notes, CATEGORIES)
+        self.assertEqual(invalid.background, Settings().background)
+        self.assertEqual(invalid.title, Settings().title)
+
+    def test_notes_are_normalized_bounded_and_ignore_malformed_items(self):
+        note = {"color": "#AABBCC", "title": "a" * 200, "description": "b" * 5000, "color_name": "tag"}
+        loaded = Settings.from_dict({"notes": [None, {"color": "#abcdef"}, note]})
+        self.assertEqual(len(loaded.notes), 1)
+        self.assertEqual(loaded.notes[0].color, "#aabbcc")
+        self.assertEqual(len(loaded.notes[0].title), 120)
+        self.assertEqual(len(loaded.notes[0].description), 4000)
+        self.assertEqual(len(Settings.from_dict({"notes": [note] * 100}).notes), MAX_NOTES)
+
+
+class ThemeTests(unittest.TestCase):
+    def test_main_text_contrast_for_presets_and_custom_colors(self):
+        colors = [background for _, background, _ in THEME_PRESETS]
+        colors += ["#000000", "#ffffff", "#ff0000", "#00ff00", "#0000ff", "#777777", "#abcdef"]
+        for color in colors:
+            with self.subTest(color=color):
+                ink = readable_ink(color)
+                contrast = (max(luminance(color), luminance(ink)) + .05) / (min(luminance(color), luminance(ink)) + .05)
+                self.assertGreaterEqual(contrast, 4.5)
+
+    def test_theme_invalid_colors_are_sanitized(self):
+        self.assertEqual(theme_colors("not a color", None), theme_colors("#fafaf8", "#273647"))
 
 
 if __name__ == "__main__":

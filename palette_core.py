@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -28,6 +29,99 @@ CATEGORIES = (
     Category("橙色", "#f19837", "实现与复现", "数据划分 · 训练设置 · 算力 · 代码"),
     Category("灰色", "#aaaaaa", "背景与术语", "基础概念 · 相关工作 · 补充知识"),
 )
+
+DEFAULT_TITLE = "论文阅读色卡"
+DEFAULT_SUBTITLE = "八种颜色，一套阅读语言"
+DEFAULT_GUIDANCE = "黄：作者主张    粉：支持主张的证据\n绿：写明怎么用    红：区分局限、疑问和已核实问题"
+MAX_NOTES = 32
+THEME_PRESETS = (
+    ("暖白", "#fafaf8", "#273647"),
+    ("纸黄", "#faf1d9", "#795b32"),
+    ("薄荷", "#eaf4ec", "#35634c"),
+    ("雾蓝", "#eaf1f9", "#345d86"),
+    ("深色", "#242b35", "#465d7c"),
+)
+
+
+def valid_color(value: object) -> str | None:
+    """Accept portable, opaque RGB colors in saved settings."""
+    if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        return value.lower()
+    return None
+
+
+def _text(value: object, default: str, limit: int) -> str:
+    return value[:limit] if isinstance(value, str) else default
+
+
+def notes_from_data(value: object) -> tuple[Category, ...]:
+    if not isinstance(value, list):
+        return CATEGORIES
+    if not value:
+        return ()
+    result = []
+    for item in value[:MAX_NOTES]:
+        if not isinstance(item, dict) or not valid_color(item.get("color")):
+            continue
+        title = _text(item.get("title"), "", 120).strip()
+        description = _text(item.get("description"), "", 4000)
+        if not title and not description.strip():
+            continue
+        result.append(Category(_text(item.get("color_name"), "", 40),
+                               valid_color(item["color"]), title, description))
+    return tuple(result) if result else CATEGORIES
+
+
+def mix_colors(color: str, target: str, amount: float) -> str:
+    channels = [round(int(color[i:i + 2], 16) * (1 - amount) +
+                      int(target[i:i + 2], 16) * amount) for i in (1, 3, 5)]
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+
+
+def luminance(color: str) -> float:
+    channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in channels]
+    return sum(v * weight for v, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+
+def readable_ink(color: str) -> str:
+    """Choose the more legible of a dark and light foreground."""
+    level = luminance(color)
+    dark, light = "#202936", "#f4f6fa"
+    dark_ratio = (max(level, luminance(dark)) + .05) / (min(level, luminance(dark)) + .05)
+    light_ratio = (max(level, luminance(light)) + .05) / (min(level, luminance(light)) + .05)
+    if max(dark_ratio, light_ratio) < 4.5:
+        return "#000000" if (level + .05) / .05 >= 1.05 / (level + .05) else "#ffffff"
+    return dark if dark_ratio >= light_ratio else light
+
+
+def _muted_ink(background: str, ink: str, amount: float) -> str:
+    for step in range(round(amount * 100), 101):
+        color = mix_colors(background, ink, step / 100)
+        levels = sorted((luminance(background), luminance(color)))
+        if (levels[1] + .05) / (levels[0] + .05) >= 4.5:
+            return color
+    return ink
+
+
+def theme_colors(background: str, accent: str) -> dict[str, str]:
+    background = valid_color(background) or THEME_PRESETS[0][1]
+    accent = valid_color(accent) or THEME_PRESETS[0][2]
+    ink = readable_ink(background)
+    light_theme = luminance(ink) < .5
+    return {
+        "background": background,
+        "ink": ink,
+        "muted": _muted_ink(background, ink, .76),
+        "subtle": _muted_ink(background, ink, .66),
+        "row": mix_colors(background, "#ffffff" if light_theme else "#000000", .65 if light_theme else .06),
+        "border": mix_colors(background, ink, .17),
+        "soft": mix_colors(background, ink, .06),
+        "hover": mix_colors(background, ink, .10),
+        "accent": accent,
+        "accent_ink": readable_ink(accent),
+        "accent_hover": mix_colors(accent, readable_ink(accent), .12),
+    }
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -58,6 +152,12 @@ class Settings:
     monitor_y: int | None = None
     collapsed: bool = False
     auto_hide: bool = False
+    title: str = DEFAULT_TITLE
+    subtitle: str = DEFAULT_SUBTITLE
+    guidance: str = DEFAULT_GUIDANCE
+    background: str = THEME_PRESETS[0][1]
+    accent: str = THEME_PRESETS[0][2]
+    notes: tuple[Category, ...] = CATEGORIES
 
     @classmethod
     def from_dict(cls, raw: object) -> "Settings":
@@ -75,6 +175,12 @@ class Settings:
         for key in ("collapsed", "auto_hide"):
             if type(raw.get(key)) is bool:
                 setattr(result, key, raw[key])
+        result.title = _text(raw.get("title"), DEFAULT_TITLE, 120).strip() or DEFAULT_TITLE
+        result.subtitle = _text(raw.get("subtitle"), DEFAULT_SUBTITLE, 200)
+        result.guidance = _text(raw.get("guidance"), DEFAULT_GUIDANCE, 2000)
+        result.background = valid_color(raw.get("background")) or result.background
+        result.accent = valid_color(raw.get("accent")) or result.accent
+        result.notes = notes_from_data(raw.get("notes"))
         return result
 
 

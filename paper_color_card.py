@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 from pathlib import Path
+from string import Template
 
 import gi
 
@@ -17,38 +18,39 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from palette_core import (  # noqa: E402
-    CATEGORIES, SettingsStore, WorkArea, dock_position,
-    fraction_for_top, handle_position, is_inward_pull, nearest_side,
+    SettingsStore, WorkArea, dock_position,
+    fraction_for_top, handle_position, is_inward_pull, nearest_side, theme_colors,
 )
+from note_editor import NoteEditor  # noqa: E402
 
 
-CSS = b"""
-window { background: transparent; font-family: 'Noto Sans CJK SC', sans-serif; }
-.card { background: #fafaf8; border: 1px solid #dfe2e7; border-radius: 15px; }
-.heading { color: #202936; font-size: 16px; font-weight: 700; }
-.subheading { color: #7b8491; font-size: 11px; padding-bottom: 3px; }
+CSS = Template("""
+.color-card { background: transparent; font-family: 'Noto Sans CJK SC', sans-serif; }
+.card { background: $background; border: 1px solid $border; border-radius: 15px; }
+.heading { color: $ink; font-size: 16px; font-weight: 700; }
+.subheading { color: $muted; font-size: 11px; padding-bottom: 3px; }
 .icon-button { background: transparent; border: none; box-shadow: none;
-  padding: 3px 7px; min-width: 17px; min-height: 20px; color: #728091; }
-.icon-button:hover { background: #e9edf2; color: #25374a; border-radius: 6px; }
-.legend { background: #ffffff; border: 1px solid #e8eaf0; border-radius: 9px;
+  padding: 3px 7px; min-width: 17px; min-height: 20px; color: $muted; }
+.icon-button:hover { background: $hover; color: $ink; border-radius: 6px; }
+.legend { background: $row; border: 1px solid $border; border-radius: 9px;
   padding: 7px 9px; margin: 0 12px 5px; }
-.row-title { color: #263243; font-size: 13px; font-weight: 700; }
-.row-detail { color: #697483; font-size: 10.5px; }
-.color-name { color: #8b939e; font-size: 10px; }
-.rules { background: #eef2f7; border-radius: 9px; padding: 8px 10px;
-  margin: 5px 12px 5px; color: #526174; font-size: 10px; }
+.row-title { color: $ink; font-size: 13px; font-weight: 700; }
+.row-detail { color: $muted; font-size: 10.5px; }
+.color-name { color: $subtle; font-size: 10px; }
+.rules { background: $soft; border-radius: 9px; padding: 8px 10px;
+  margin: 5px 12px 5px; color: $muted; font-size: 10px; }
 .footer { padding: 6px 14px 12px; }
-.footer label { color: #687587; font-size: 10px; }
-.footer check { background: #ffffff; border: 1px solid #b9c4d1; border-radius: 3px;
+.footer label { color: $muted; font-size: 10px; }
+.footer check { background: $row; border: 1px solid $border; border-radius: 3px;
   min-width: 13px; min-height: 13px; }
-.footer check:checked { background: #5b7898; border-color: #5b7898; color: #ffffff; }
-.hint { color: #8a939f; font-size: 9px; }
-.pull-tab { background: #273647; color: #ffffff; border-radius: 12px;
-  border: 1px solid #6b7e92; padding: 7px 3px; }
-.pull-tab:hover { background: #344a62; }
-.pull-title { font-size: 11px; color: #ffffff; font-weight: 700; }
-.pull-arrow { font-size: 13px; color: #bdcde1; }
-"""
+.footer check:checked { background: $accent; border-color: $accent; color: $accent_ink; }
+.hint { color: $subtle; font-size: 9px; }
+.pull-tab { background: $accent; color: $accent_ink; border-radius: 12px;
+  border: 1px solid $accent_hover; padding: 7px 3px; }
+.pull-tab:hover { background: $accent_hover; }
+.pull-title { font-size: 11px; color: $accent_ink; font-weight: 700; }
+.pull-arrow { font-size: 13px; color: $accent_ink; }
+""")
 
 
 def label(text: str, css_class: str, *, wrap: bool = False) -> Gtk.Label:
@@ -91,6 +93,8 @@ class ColorCard(Gtk.Application):
         self.hide_timer = None
         self.hover_timer = None
         self.position_timer = None
+        self.editor = None
+        self.css_provider = None
         self.smoke = smoke
         self.snapshot = snapshot
         self.smoke_error = None
@@ -99,7 +103,7 @@ class ColorCard(Gtk.Application):
     def do_startup(self):
         Gtk.Application.do_startup(self)
         for name, callback in (("expand", self.expand), ("collapse", self.collapse),
-                               ("quit", self.quit_card)):
+                               ("edit", self.edit), ("quit", self.quit_card)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", lambda _action, _parameter, fn=callback: fn())
             self.add_action(action)
@@ -107,17 +111,17 @@ class ColorCard(Gtk.Application):
     def do_activate(self):
         if self.panel is not None:
             self.expand()
-            self.panel.present()
+            (self.editor or self.panel).present()
             return
         display = Gdk.Display.get_default()
         if display is None:
             raise RuntimeError("没有可用的桌面显示。请在桌面会话里启动论文阅读色卡。")
         if "Wayland" in display.__class__.__name__:
             raise RuntimeError("当前版本需要 X11；Wayland 不保证置顶与贴边定位。")
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
+        self.css_provider = Gtk.CssProvider()
+        self._apply_theme()
         Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            Gdk.Screen.get_default(), self.css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.panel = self._window("论文阅读色卡")
         self.tab = self._window("论文阅读色卡 · 拉手")
         self._build_panel()
@@ -137,6 +141,7 @@ class ColorCard(Gtk.Application):
 
     def _window(self, title):
         window = Gtk.ApplicationWindow(application=self)
+        window.get_style_context().add_class("color-card")
         window.set_title(title)
         window.set_decorated(False)
         window.set_resizable(False)
@@ -181,32 +186,59 @@ class ColorCard(Gtk.Application):
         bar.set_margin_top(13)
         bar.set_margin_bottom(7)
         names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        names.pack_start(label("论文阅读色卡", "heading"), False, False, 0)
-        names.pack_start(label("八种颜色，一套阅读语言", "subheading"), False, False, 0)
+        heading = label(self.settings.title, "heading")
+        heading.set_max_width_chars(13)
+        heading.set_ellipsize(Pango.EllipsizeMode.END)
+        heading.set_tooltip_text(self.settings.title)
+        names.pack_start(heading, False, False, 0)
+        if self.settings.subtitle:
+            subtitle = label(self.settings.subtitle, "subheading")
+            subtitle.set_max_width_chars(24)
+            subtitle.set_ellipsize(Pango.EllipsizeMode.END)
+            subtitle.set_tooltip_text(self.settings.subtitle)
+            names.pack_start(subtitle, False, False, 0)
         bar.pack_start(names, True, True, 0)
         bar.pack_end(self._button("×", "退出色卡（可从应用菜单重新打开）", self.quit_card), False, False, 0)
         bar.pack_end(self._button("›", "收起到屏幕边缘 · Esc", self.collapse), False, False, 0)
+        self.edit_button = self._button("编辑", "编辑内容和主题 · Ctrl+E", self.edit)
+        bar.pack_end(self.edit_button, False, False, 0)
         header.add(bar)
         self._bind_drag(header, "panel")
+        self.drag_header = header
         root.pack_start(header, False, False, 0)
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        for category in CATEGORIES:
+        for category in self.settings.notes:
             row = Gtk.Box(spacing=10)
             row.get_style_context().add_class("legend")
             row.pack_start(swatch(category.color), False, False, 0)
             text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             title = Gtk.Box()
-            title.pack_start(label(category.title, "row-title"), True, True, 0)
-            title.pack_end(label(category.color_name, "color-name"), False, False, 0)
+            note_title = label(category.title, "row-title", wrap=True)
+            note_title.set_max_width_chars(25)
+            title.pack_start(note_title, True, True, 0)
+            if category.color_name:
+                tag = label(category.color_name, "color-name")
+                tag.set_max_width_chars(8)
+                tag.set_ellipsize(Pango.EllipsizeMode.END)
+                tag.set_tooltip_text(category.color_name)
+                title.pack_end(tag, False, False, 0)
             text.pack_start(title, False, False, 0)
-            text.pack_start(label(category.description, "row-detail"), False, False, 0)
+            if category.description:
+                detail = label(category.description, "row-detail", wrap=True)
+                detail.set_max_width_chars(32)
+                text.pack_start(detail, False, False, 0)
             row.pack_start(text, True, True, 0)
             content.pack_start(row, False, False, 0)
-        rules = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        rules.get_style_context().add_class("rules")
-        for text in ("黄：作者主张    粉：支持主张的证据", "绿：写明怎么用    红：区分局限、疑问和已核实问题"):
-            rules.pack_start(label(text, ""), False, False, 0)
-        content.pack_start(rules, False, False, 0)
+        if not self.settings.notes:
+            empty = label("还没有提示，点击右上角「编辑」添加内容。", "row-detail", wrap=True)
+            empty.set_margin_start(14)
+            empty.set_margin_end(14)
+            empty.set_margin_bottom(14)
+            content.pack_start(empty, False, False, 0)
+        if self.settings.guidance:
+            rules = label(self.settings.guidance, "rules", wrap=True)
+            rules.set_max_width_chars(36)
+            content.pack_start(rules, False, False, 0)
         self.scroll = Gtk.ScrolledWindow()
         self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.scroll.set_propagate_natural_height(True)
@@ -226,12 +258,12 @@ class ColorCard(Gtk.Application):
         tab = Gtk.EventBox()
         tab.get_style_context().add_class("pull-tab")
         tab.set_size_request(28, 116)
-        tab.set_tooltip_text("论文阅读色卡：点击、悬停或向屏幕内拖动展开；可上下拖动")
+        tab.set_tooltip_text(self.settings.title + "：点击、悬停或向屏幕内拖动展开；可上下拖动")
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        title = label("色\n卡", "pull-title")
+        title = label("便\n签", "pull-title")
         title.set_xalign(0.5)
         column.pack_start(title, False, False, 0)
-        for category in CATEGORIES:
+        for category in self.settings.notes[:8]:
             dot = swatch(category.color, 12, 3)
             dot.set_halign(Gtk.Align.CENTER)
             column.pack_start(dot, False, False, 0)
@@ -240,9 +272,50 @@ class ColorCard(Gtk.Application):
         column.pack_end(self.arrow, False, False, 0)
         tab.add(column)
         self._bind_drag(tab, "tab")
+        self.drag_tab = tab
         tab.connect("enter-notify-event", self._hover_tab)
         tab.connect("leave-notify-event", lambda *_: self._cancel_hover())
         self.tab.add(tab)
+
+    def _apply_theme(self):
+        colors = theme_colors(self.settings.background, self.settings.accent)
+        self.css_provider.load_from_data(CSS.substitute(colors).encode("utf-8"))
+
+    def edit(self):
+        if self.editor is not None:
+            self.editor.present()
+            return
+        self.expand()
+        self.editor = NoteEditor(self.panel, self.settings)
+        self.editor.connect("response", self._editor_response)
+        self.editor.connect("destroy", self._editor_destroyed)
+        self.editor.show_all()
+        self.editor.present()
+
+    def _editor_response(self, editor, response):
+        if response == Gtk.ResponseType.OK:
+            try:
+                updated = editor.read_settings(self.settings)
+                self.store.save(updated)
+            except (OSError, ValueError) as error:
+                editor.show_error("无法保存：" + str(error))
+                return
+            self.settings = updated
+            self._apply_theme()
+            self.panel.get_child().destroy()
+            self.tab.get_child().destroy()
+            self._build_panel()
+            self._build_tab()
+            self.panel.show_all()
+            self.tab.hide()
+            self.panel.resize(354, 1)
+            self._mapped()
+        editor.destroy()
+
+    def _editor_destroyed(self, *_):
+        self.editor = None
+        if self.settings.auto_hide:
+            self._queue_auto_hide()
 
     def workarea(self, point=None):
         display = Gdk.Display.get_default()
@@ -316,6 +389,8 @@ class ColorCard(Gtk.Application):
         return False
 
     def collapse(self):
+        if self.editor is not None:
+            return False
         self._cancel_hover()
         self._cancel_hide()
         self.settings.collapsed = True
@@ -346,7 +421,7 @@ class ColorCard(Gtk.Application):
 
     def _maybe_hide(self):
         self.hide_timer = None
-        if self.drag or not self.settings.auto_hide:
+        if self.drag or self.editor is not None or not self.settings.auto_hide:
             return False
         pointer = Gdk.Display.get_default().get_default_seat().get_pointer()
         _, x, y = pointer.get_position()
@@ -377,7 +452,7 @@ class ColorCard(Gtk.Application):
         widget.connect("button-release-event", self._drag_end)
 
     def _drag_start(self, _widget, event, kind):
-        if event.button != 1:
+        if event.button != 1 or self.editor is not None:
             return False
         self._cancel_hide()
         self._cancel_hover()
@@ -430,9 +505,14 @@ class ColorCard(Gtk.Application):
         if event.state & Gdk.ModifierType.CONTROL_MASK and event.keyval in (Gdk.KEY_q, Gdk.KEY_Q):
             self.quit_card()
             return True
+        if event.state & Gdk.ModifierType.CONTROL_MASK and event.keyval in (Gdk.KEY_e, Gdk.KEY_E):
+            self.edit()
+            return True
         return False
 
     def quit_card(self):
+        if self.editor is not None:
+            self.editor.destroy()
         self._cancel_hide()
         self._cancel_hover()
         if self.position_timer:
@@ -450,7 +530,7 @@ class ColorCard(Gtk.Application):
     def _smoke_expanded(self):
         try:
             self._check("expanded panel visible", self.panel.get_visible() and not self.tab.get_visible())
-            self._check("all eight color rows", len(CATEGORIES) == 8)
+            self._check("all eight default color rows", len(self.settings.notes) == 8)
             self._check("fits monitor", self.panel.get_size()[1] <= self.workarea().height)
             expected = dock_position(self.workarea(), tuple(self.panel.get_size()),
                                      self.settings.side, self.settings.y_fraction)
