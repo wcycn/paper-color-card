@@ -150,8 +150,20 @@ class DesktopChecks:
             traceback.print_exc()
             self.finish()
             return False
+        if self.args.require_wm:
+            delay = max(delay, 350)
         GLib.timeout_add(delay, self.tick)
         return False
+
+    def open_settings(self):
+        for _ in range(2):
+            self.input.click(self.app.edit_button)
+            for _ in range(4):
+                yield 75
+                if self.app.editor is not None and self.app.editor.get_visible():
+                    yield 125
+                    return
+        self.check('settings dialog opens after a real click', False)
 
     def finish(self):
         if self.other is not None:
@@ -212,16 +224,14 @@ class DesktopChecks:
             self.results.append("SKIPPED: actual keep-above (no window manager)")
 
         # Click the real edit button, fill GTK controls, and click Save/Cancel.
-        self.input.click(self.app.edit_button)
-        yield 250
+        yield from self.open_settings()
         self.check("edit button opens modal editor", self.app.editor is not None and self.app.editor.get_visible())
         self.capture("editor", self.app.editor)
         self.app.editor.title_entry.set_text("未保存的草稿")
         self.input.click(self.app.editor.get_widget_for_response(Gtk.ResponseType.CANCEL))
         yield 150
         self.check("cancel preserves saved content", self.app.editor is None and self.app.settings.title == "论文阅读色卡")
-        self.input.click(self.app.edit_button)
-        yield 180
+        yield from self.open_settings()
         editor = self.app.editor
         editor.title_entry.set_text("阅读提示")
         editor.subtitle_entry.set_text("读到哪里，记到哪里")
@@ -243,8 +253,7 @@ class DesktopChecks:
                    self.app.settings.background == "#242b35" and self.app.settings.notes[0].color == "#7eb4e3")
         self.capture("dark")
 
-        self.input.click(self.app.edit_button)
-        yield 180
+        yield from self.open_settings()
         editor = self.app.editor
         set_color(editor.background_button, "#eaf4ec")
         editor.background_button.emit("color-set")
@@ -267,8 +276,7 @@ class DesktopChecks:
         self.capture("custom")
 
         sample_notes = self.app.settings.notes
-        self.input.click(self.app.edit_button)
-        yield 160
+        yield from self.open_settings()
         editor = self.app.editor
         while len(editor.rows) > 1:
             editor.remove_note(editor.rows[-1])
@@ -286,8 +294,7 @@ class DesktopChecks:
         width, height = self.app.panel.get_size()
         self.check("long content wraps and scrolls within monitor", width <= self.app.workarea().width and
                    height <= self.app.workarea().height and len(self.app.settings.notes[0].description) == 4000)
-        self.input.click(self.app.edit_button)
-        yield 160
+        yield from self.open_settings()
         editor = self.app.editor
         for row in editor.rows[:]:
             editor.remove_note(row)
@@ -295,8 +302,7 @@ class DesktopChecks:
         self.input.click(editor.get_widget_for_response(Gtk.ResponseType.OK))
         yield 220
         self.check("empty note list can be saved and reopened", self.app.settings.notes == () and self.app.panel.get_visible())
-        self.input.click(self.app.edit_button)
-        yield 160
+        yield from self.open_settings()
         editor = self.app.editor
         editor.title_entry.set_text("阅读提示")
         editor.guidance_view.get_buffer().set_text("随手记下，读完再整理。")
@@ -374,7 +380,7 @@ class DesktopChecks:
         self.check("mouse leaving triggers optional auto-hide", self.app.settings.auto_hide and self.app.settings.collapsed)
         self.input.click(self.app.drag_tab)
         yield 120
-        self.input.click(self.app.edit_button)
+        yield from self.open_settings()
         yield 1000
         self.check("auto-hide does not interrupt editing", self.app.editor is not None and not self.app.settings.collapsed)
         self.input.click(self.app.editor.get_widget_for_response(Gtk.ResponseType.CANCEL))
@@ -474,8 +480,7 @@ class DesktopChecks:
         yield 250
         pane = self.app.markdown_pane
         self.check('switching modes preserves document', pane is not None and pane.text() == original_text)
-        self.input.click(self.app.edit_button)
-        yield 150
+        yield from self.open_settings()
         self.app.editor.preset.set_active(4)
         self.app.editor.title_entry.set_text('我的便签')
         self.input.click(self.app.editor.get_widget_for_response(Gtk.ResponseType.OK))
