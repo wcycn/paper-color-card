@@ -64,8 +64,7 @@ class XInput:
         self.xlib.XFlush(self.display)
 
     def button(self, down):
-        # Allow the real window manager to replay a focus click before release.
-        self.xtest.XTestFakeButtonEvent(self.display, 1, int(down), 20 if down else 40)
+        self.xtest.XTestFakeButtonEvent(self.display, 1, int(down), 0)
         self.xlib.XFlush(self.display)
 
     def click(self, widget):
