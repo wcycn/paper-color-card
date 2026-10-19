@@ -10,6 +10,8 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from markdown_core import DEFAULT_MARKDOWN
+
 
 @dataclass(frozen=True)
 class Category:
@@ -152,12 +154,14 @@ class Settings:
     monitor_y: int | None = None
     collapsed: bool = False
     auto_hide: bool = False
-    title: str = DEFAULT_TITLE
-    subtitle: str = DEFAULT_SUBTITLE
+    title: str = "悬浮便签"
+    subtitle: str = "随手写，随时看"
     guidance: str = DEFAULT_GUIDANCE
     background: str = THEME_PRESETS[0][1]
     accent: str = THEME_PRESETS[0][2]
     notes: tuple[Category, ...] = CATEGORIES
+    content_mode: str = "markdown"
+    markdown: str = DEFAULT_MARKDOWN
 
     @classmethod
     def from_dict(cls, raw: object) -> "Settings":
@@ -175,12 +179,25 @@ class Settings:
         for key in ("collapsed", "auto_hide"):
             if type(raw.get(key)) is bool:
                 setattr(result, key, raw[key])
-        result.title = _text(raw.get("title"), DEFAULT_TITLE, 120).strip() or DEFAULT_TITLE
-        result.subtitle = _text(raw.get("subtitle"), DEFAULT_SUBTITLE, 200)
+        result.title = _text(raw.get("title"), result.title, 120).strip() or result.title
+        result.subtitle = _text(raw.get("subtitle"), result.subtitle, 200)
         result.guidance = _text(raw.get("guidance"), DEFAULT_GUIDANCE, 2000)
         result.background = valid_color(raw.get("background")) or result.background
         result.accent = valid_color(raw.get("accent")) or result.accent
         result.notes = notes_from_data(raw.get("notes"))
+        if raw.get("content_mode") in ("markdown", "palette"):
+            result.content_mode = raw["content_mode"]
+        if isinstance(raw.get("markdown"), str):
+            result.markdown = raw["markdown"]
+        elif result.notes != CATEGORIES or result.guidance != DEFAULT_GUIDANCE:
+            parts = ["## " + (note.title or note.color_name or "提示") + "\n\n" + note.description
+                     for note in result.notes]
+            if result.guidance:
+                parts.append(result.guidance)
+            result.markdown = "\n\n".join(parts)
+        if ("markdown" not in raw and result.content_mode == "markdown" and
+                result.title == DEFAULT_TITLE and result.subtitle == DEFAULT_SUBTITLE):
+            result.title, result.subtitle = "悬浮便签", "随手写，随时看"
         return result
 
 

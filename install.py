@@ -19,11 +19,11 @@ def main():
     applications.mkdir(parents=True, exist_ok=True)
     entry.write_text("\n".join([
         "[Desktop Entry]", "Version=1.0", "Type=Application", "Name=论文阅读色卡",
-        "Name[en]=Paper Color Card", "Comment=可编辑内容、可调整主题的置顶贴边提示便签",
+        "Name[en]=Paper Color Card", "Comment=支持 Markdown 编辑预览、主题调整和色卡的置顶悬浮便签",
         "Exec=" + quote_exec(sys.executable) + " " + quote_exec(root / "launch.py"),
         "Icon=" + str(root / "icon.svg"), "Terminal=false", "StartupNotify=false",
         "StartupWMClass=paper-color-card", "Categories=Utility;",
-        "Keywords=Paper;Notes;Colors;论文;阅读;色卡;便签;提示;", "X-PaperColorCard-Managed=true", "",
+        "Keywords=Markdown;Paper;Notes;Colors;论文;阅读;色卡;便签;提示;", "X-PaperColorCard-Managed=true", "",
     ]), encoding="utf-8")
     entry.chmod(0o644)
     print(entry)

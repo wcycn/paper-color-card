@@ -54,7 +54,7 @@ def get_text(view: Gtk.TextView) -> str:
 
 class NoteEditor(Gtk.Dialog):
     def __init__(self, parent: Gtk.Window, settings: Settings):
-        super().__init__(title="编辑提示便签", transient_for=parent, modal=True)
+        super().__init__(title="便签设置", transient_for=parent, modal=True)
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
         self.set_destroy_with_parent(True)
@@ -119,22 +119,27 @@ class NoteEditor(Gtk.Dialog):
             button.connect("color-set", self._custom_color)
         self._preview_theme()
 
-        body.pack_start(caption("提示内容 · 可换行，每条可选颜色和短标签"), False, False, 0)
+        palette = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        expander = Gtk.Expander(label="色卡内容（可选）")
+        expander.set_expanded(settings.content_mode == "palette")
+        expander.add(palette)
+        body.pack_start(expander, False, False, 0)
+        palette.pack_start(caption("提示内容 · 可换行，每条可选颜色和短标签"), False, False, 0)
         self.note_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        body.pack_start(self.note_list, False, False, 0)
+        palette.pack_start(self.note_list, False, False, 0)
         for note in settings.notes:
             self.add_note(note)
         self.add_note_button = Gtk.Button(label="＋ 添加一条提示")
         self.add_note_button.connect("clicked", lambda *_: self.add_note())
-        body.pack_start(self.add_note_button, False, False, 0)
+        palette.pack_start(self.add_note_button, False, False, 0)
         self._update_limit()
-        body.pack_start(caption("底部提示，可留空"), False, False, 0)
+        palette.pack_start(caption("底部提示，可留空"), False, False, 0)
         guidance_scroll, self.guidance_view = text_view(settings.guidance, 64)
-        body.pack_start(guidance_scroll, False, False, 0)
+        palette.pack_start(guidance_scroll, False, False, 0)
         restore = Gtk.Button(label="恢复默认八色色卡内容")
         restore.set_tooltip_text("只修改当前草稿；点击保存后才会替换已保存的内容")
         restore.connect("clicked", self._restore)
-        body.pack_start(restore, False, False, 0)
+        palette.pack_start(restore, False, False, 0)
         hint = caption("保存后立即生效。便签内容和主题只保存在本机。")
         body.pack_start(hint, False, False, 0)
         self.error = caption("")
@@ -228,7 +233,8 @@ class NoteEditor(Gtk.Dialog):
         guidance = get_text(self.guidance_view)
         if len(guidance) > 2000:
             raise ValueError("底部提示超过 2000 字，请缩短后保存。")
-        return replace(current, title=self.title_entry.get_text().strip() or DEFAULT_TITLE,
+        return replace(current, title=self.title_entry.get_text().strip() or
+                       ("悬浮便签" if current.content_mode == "markdown" else DEFAULT_TITLE),
                        subtitle=self.subtitle_entry.get_text(), guidance=guidance,
                        background=color_value(self.background_button), accent=color_value(self.accent_button),
                        notes=tuple(notes))

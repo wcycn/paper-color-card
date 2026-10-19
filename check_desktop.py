@@ -21,10 +21,10 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkX11", "3.0")
-from gi.repository import Gdk, GdkX11, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GdkX11, Gio, GLib, Gtk  # noqa: E402
 
 from note_editor import set_color  # noqa: E402
-from palette_core import SettingsStore, dock_position  # noqa: E402
+from palette_core import Settings, SettingsStore, dock_position  # noqa: E402
 from paper_color_card import ColorCard  # noqa: E402
 
 
@@ -36,13 +36,26 @@ class XInput:
         self.xlib.XOpenDisplay.restype = C.c_void_p
         self.xlib.XFlush.argtypes = [C.c_void_p]
         self.xlib.XCloseDisplay.argtypes = [C.c_void_p]
+        self.xlib.XDefaultRootWindow.argtypes = [C.c_void_p]
+        self.xlib.XDefaultRootWindow.restype = C.c_ulong
+        self.xlib.XQueryPointer.argtypes = [C.c_void_p, C.c_ulong, C.POINTER(C.c_ulong), C.POINTER(C.c_ulong),
+                                           C.POINTER(C.c_int), C.POINTER(C.c_int), C.POINTER(C.c_int),
+                                           C.POINTER(C.c_int), C.POINTER(C.c_uint)]
         self.xtest.XTestFakeMotionEvent.argtypes = [C.c_void_p, C.c_int, C.c_int, C.c_int, C.c_ulong]
         self.xtest.XTestFakeButtonEvent.argtypes = [C.c_void_p, C.c_uint, C.c_int, C.c_ulong]
+        self.xtest.XTestFakeKeyEvent.argtypes = [C.c_void_p, C.c_uint, C.c_int, C.c_ulong]
+        self.xlib.XStringToKeysym.argtypes = [C.c_char_p]
+        self.xlib.XStringToKeysym.restype = C.c_ulong
+        self.xlib.XKeysymToKeycode.argtypes = [C.c_void_p, C.c_ulong]
+        self.xlib.XKeysymToKeycode.restype = C.c_uint
         self.display = self.xlib.XOpenDisplay(None)
         if not self.display:
             raise RuntimeError("X11 display unavailable")
-        pointer = Gdk.Display.get_default().get_default_seat().get_pointer()
-        self.original_pointer = pointer.get_position()[1:]
+        root, child = C.c_ulong(), C.c_ulong()
+        x, y, wx, wy, mask = C.c_int(), C.c_int(), C.c_int(), C.c_int(), C.c_uint()
+        self.xlib.XQueryPointer(self.display, self.xlib.XDefaultRootWindow(self.display), C.byref(root),
+                               C.byref(child), C.byref(x), C.byref(y), C.byref(wx), C.byref(wy), C.byref(mask))
+        self.original_pointer = x.value, y.value
         # GDK reports logical coordinates; XTest takes physical X11 pixels.
         self.scale = Gdk.Screen.get_default().get_root_window().get_scale_factor()
 
@@ -51,7 +64,8 @@ class XInput:
         self.xlib.XFlush(self.display)
 
     def button(self, down):
-        self.xtest.XTestFakeButtonEvent(self.display, 1, int(down), 0)
+        # Allow the real window manager to replay a focus click before release.
+        self.xtest.XTestFakeButtonEvent(self.display, 1, int(down), 20 if down else 40)
         self.xlib.XFlush(self.display)
 
     def click(self, widget):
@@ -59,8 +73,23 @@ class XInput:
         self.button(True)
         self.button(False)
 
+    def shortcut(self, name, shift=False):
+        def key(symbol, down):
+            code = self.xlib.XKeysymToKeycode(self.display, self.xlib.XStringToKeysym(symbol.encode()))
+            self.xtest.XTestFakeKeyEvent(self.display, code, int(down), 0)
+        key('Control_L', True)
+        if shift:
+            key('Shift_L', True)
+        key(name, True)
+        key(name, False)
+        if shift:
+            key('Shift_L', False)
+        key('Control_L', False)
+        self.xlib.XFlush(self.display)
+
     def close(self):
-        self.move(*self.original_pointer)
+        self.xtest.XTestFakeMotionEvent(self.display, -1, *self.original_pointer, 0)
+        self.xlib.XFlush(self.display)
         self.xlib.XCloseDisplay(self.display)
 
 
@@ -86,13 +115,18 @@ def button_with_label(widget, label):
 class DesktopChecks:
     def __init__(self, args):
         self.args = args
-        self.app = ColorCard(args.output_dir / "config")
+        config = args.output_dir / ("markdown_config" if args.phase.startswith("markdown") else "config")
+        if args.phase == "interactions" and not config.exists():
+            SettingsStore(config).save(Settings(content_mode="palette", title="论文阅读色卡",
+                                               subtitle="八种颜色，一套阅读语言"))
+        self.app = ColorCard(config)
         self.results = []
         self.failed = False
         self.input = None
         self.child = None
         self.other = None
-        self.steps = self.restore() if args.phase == "restore" else self.interactions()
+        self.steps = {"restore": self.restore, "interactions": self.interactions,
+                      "markdown": self.markdown_checks, "markdown_restore": self.markdown_restore}[args.phase]()
 
     def check(self, name, condition):
         if not condition:
@@ -172,6 +206,8 @@ class DesktopChecks:
                        bool(self.app.panel.get_window().get_state() & Gdk.WindowState.ABOVE))
             self.other.destroy()
             self.other = None
+            self.app.panel.present()
+            yield 180
         else:
             self.results.append("SKIPPED: actual keep-above (no window manager)")
 
@@ -359,27 +395,148 @@ class DesktopChecks:
         self.app.run([sys.argv[0]])
         return int(self.failed)
 
+    def markdown_restore(self):
+        yield 400
+        expected = json.loads((self.args.output_dir / 'markdown_expected.json').read_text(encoding='utf-8'))
+        self.check('Markdown source and mode survive restart', self.app.settings.markdown == expected['text'] and
+                   self.app.settings.content_mode == 'markdown')
+        self.check('Markdown theme and collapsed state survive restart', self.app.settings.background == '#242b35' and
+                   self.app.settings.collapsed and self.app.tab.get_visible())
+
+    def markdown_checks(self):
+        yield 450
+        self.input = XInput()
+        pane = self.app.markdown_pane
+        self.check('fresh note starts in Markdown preview', pane is not None and not pane.editing)
+        self.check('loaded document reaches the native editor unchanged', pane.text() == self.app.settings.markdown)
+        self.input.click(pane.edit_button)
+        yield 180
+        self.check('Markdown edit button opens the source editor', pane.editing and pane.source.has_focus())
+        document = ('# 自由便签\n\n## 今天\n- [ ] 重要任务\n- [x] 已完成\n\n'
+                    '> 自己决定写什么。\n\n```python\nprint("hello")\n```\n\n'
+                    '| 项目 | 状态 |\n| --- | --- |\n| 笔记 | 进行中 |\n\n'
+                    '[参考](https://example.com)\n\n' + '这里是自由填写的正文。\n' * 450)
+        pane.replace_text(document)
+        yield 850
+        self.check('freeform document beyond old card limits autosaves', len(document) > 4000 and
+                   self.app.store.load().markdown == document and not pane.dirty)
+        offset = document.index('重要任务')
+        pane.source_buffer.select_range(pane.source_buffer.get_iter_at_offset(offset),
+                                        pane.source_buffer.get_iter_at_offset(offset + 4))
+        self.input.shortcut('b')
+        yield 100
+        self.check('bold shortcut edits Markdown source', '**重要任务**' in pane.text())
+        self.input.shortcut('z')
+        yield 100
+        self.check('undo restores source', pane.text() == document)
+        self.input.shortcut('z', shift=True)
+        yield 100
+        self.check('redo restores formatting', '**重要任务**' in pane.text())
+        self.input.shortcut('s')
+        yield 100
+        self.check('Ctrl+S saves immediately', self.app.store.load().markdown == pane.text() and not pane.dirty)
+        self.input.click(pane.preview_button)
+        yield 180
+        rendered = pane.preview_buffer.get_text(pane.preview_buffer.get_start_iter(), pane.preview_buffer.get_end_iter(), True)
+        self.check('preview renders headings, tasks, tables and code', not pane.editing and '☐ 重要任务' in rendered and
+                   '☑ 已完成' in rendered and 'print("hello")' in rendered and '│' in rendered and '# 自由便签' not in rendered)
+        self.check('preview is selectable read-only native text', not pane.preview.get_editable())
+        self.capture('markdown-preview')
+        self.input.click(pane.edit_button)
+        yield 100
+        original_save = self.app.store.save
+        def cannot_save(_settings):
+            raise OSError('simulated write failure')
+        self.app.store.save = cannot_save
+        pane.replace_text('# 保存失败时的草稿\n\n仍在编辑区。')
+        self.check('failed autosave retains draft', not pane.save_now() and pane.dirty and '保存失败' in pane.status.get_text())
+        self.app.quit_card()
+        self.check('failed save prevents silent data loss on quit', pane.dirty and self.app.panel.get_visible())
+        rescue = self.args.output_dir / 'rescue.md'
+        pane.export_file(rescue)
+        self.check('unsaved draft can still be exported', rescue.read_text(encoding='utf-8') == pane.text())
+        self.app.store.save = original_save
+        self.check('retry saves retained draft', pane.save_now() and self.app.store.load().markdown == pane.text())
+
+        imported = self.args.output_dir / 'import.md'
+        original_text = '# 自己的 Markdown\n\n**重点** 与 `代码`\n\n- [ ] 随时记下一个想法\n'
+        imported.write_text(original_text, encoding='utf-8')
+        pane.import_file(imported)
+        self.check('Markdown import persists a local copy', pane.text() == original_text and
+                   self.app.store.load().markdown == original_text and imported.read_text(encoding='utf-8') == original_text)
+        exported = self.args.output_dir / 'export.md'
+        pane.export_file(exported)
+        self.check('Markdown export preserves source', exported.read_text(encoding='utf-8') == original_text)
+        self.app.mode_combo.set_active_id('palette')
+        yield 250
+        self.check('original color cards remain available', self.app.markdown_pane is None and len(self.app.settings.notes) == 8)
+        self.app.mode_combo.set_active_id('markdown')
+        yield 250
+        pane = self.app.markdown_pane
+        self.check('switching modes preserves document', pane is not None and pane.text() == original_text)
+        self.input.click(self.app.edit_button)
+        yield 150
+        self.app.editor.preset.set_active(4)
+        self.app.editor.title_entry.set_text('我的便签')
+        self.input.click(self.app.editor.get_widget_for_response(Gtk.ResponseType.OK))
+        yield 250
+        pane = self.app.markdown_pane
+        self.check('theme update preserves Markdown', self.app.settings.background == '#242b35' and pane.text() == original_text)
+        self.capture('markdown-dark')
+        self.input.click(pane.edit_button)
+        yield 180
+        self.capture('markdown-editor')
+        self.app.auto_toggle.set_active(True)
+        self.input.move(*self.app.workarea().center)
+        self.app._queue_auto_hide()
+        yield 950
+        self.check('auto-hide does not interrupt Markdown editing', self.app.panel.get_visible() and pane.editing)
+        self.input.click(pane.preview_button)
+        self.input.move(*self.app.workarea().center)
+        yield 1000
+        self.check('auto-hide resumes in Markdown preview', self.app.settings.collapsed and self.app.tab.get_visible())
+        (self.args.output_dir / 'markdown_expected.json').write_text(json.dumps({'text': original_text}), encoding='utf-8')
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--require-wm", action="store_true")
-    parser.add_argument("--phase", choices=("interactions", "restore"))
+    parser.add_argument("--phase", choices=("interactions", "restore", "markdown", "markdown_restore"))
     args = parser.parse_args()
+    if args.require_wm:
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            active = bus.call_sync('org.gnome.ScreenSaver', '/org/gnome/ScreenSaver',
+                                   'org.gnome.ScreenSaver', 'GetActive', None, None,
+                                   Gio.DBusCallFlags.NO_AUTO_START, 1000, None)
+            if active.unpack()[0]:
+                raise SystemExit('Desktop is locked. Unlock it before real-input GUI checks.')
+        except GLib.Error:
+            pass  # The isolated test bus has no desktop services.
     args.output_dir = args.output_dir or Path(tempfile.mkdtemp(prefix="paper-color-card-check-"))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.phase:
         return DesktopChecks(args).run()
     if (args.output_dir / "config").exists():
         raise SystemExit("Use a fresh output directory to preserve earlier test artifacts.")
-    for phase in ("interactions", "restore"):
-        command = [sys.executable, str(Path(__file__).resolve()), "--phase", phase,
-                   "--output-dir", str(args.output_dir)]
-        if args.require_wm:
-            command.append("--require-wm")
-        result = subprocess.run(command, timeout=35, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
-        if result.returncode:
-            return result.returncode
+    pointer_guard = XInput() if args.require_wm else None
+    try:
+        for phase in ("interactions", "restore", "markdown", "markdown_restore"):
+            command = [sys.executable, str(Path(__file__).resolve()), "--phase", phase,
+                       "--output-dir", str(args.output_dir)]
+            if args.require_wm:
+                command.append("--require-wm")
+            try:
+                result = subprocess.run(command, timeout=35, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+            except subprocess.TimeoutExpired:
+                print("GUI check timed out in phase: " + phase, file=sys.stderr)
+                return 124
+            if result.returncode:
+                return result.returncode
+    finally:
+        if pointer_guard:
+            pointer_guard.close()
     print("GUI interaction checks passed. Artifacts: " + str(args.output_dir))
     return 0
 

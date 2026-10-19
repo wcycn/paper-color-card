@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 from string import Template
 
@@ -22,6 +23,7 @@ from palette_core import (  # noqa: E402
     fraction_for_top, handle_position, is_inward_pull, nearest_side, theme_colors,
 )
 from note_editor import NoteEditor  # noqa: E402
+from markdown_view import MarkdownPane  # noqa: E402
 
 
 CSS = Template("""
@@ -50,6 +52,11 @@ CSS = Template("""
 .pull-tab:hover { background: $accent_hover; }
 .pull-title { font-size: 11px; color: $accent_ink; font-weight: 700; }
 .pull-arrow { font-size: 13px; color: $accent_ink; }
+.markdown-source, .markdown-preview { background: $background; color: $ink; }
+.markdown-source text { background: $row; color: $ink; font-family: monospace; font-size: 12px; }
+.markdown-preview text { background: $background; color: $ink; font-size: 13px; }
+.markdown-status { color: $muted; font-size: 10px; }
+.markdown-format { padding: 2px 6px; min-width: 18px; }
 """)
 
 
@@ -95,6 +102,8 @@ class ColorCard(Gtk.Application):
         self.position_timer = None
         self.editor = None
         self.css_provider = None
+        self.markdown_pane = None
+        self._changing_mode = False
         self.smoke = smoke
         self.snapshot = snapshot
         self.smoke_error = None
@@ -103,7 +112,7 @@ class ColorCard(Gtk.Application):
     def do_startup(self):
         Gtk.Application.do_startup(self)
         for name, callback in (("expand", self.expand), ("collapse", self.collapse),
-                               ("edit", self.edit), ("quit", self.quit_card)):
+                               ("edit", self.edit), ("settings", self.open_settings), ("quit", self.quit_card)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", lambda _action, _parameter, fn=callback: fn())
             self.add_action(action)
@@ -173,7 +182,7 @@ class ColorCard(Gtk.Application):
 
     def _build_panel(self):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        root.set_size_request(354, -1)
+        root.set_size_request(self._panel_width(), -1)
         root.get_style_context().add_class("card")
         self.panel.add(root)
         header = Gtk.EventBox()
@@ -200,12 +209,48 @@ class ColorCard(Gtk.Application):
         bar.pack_start(names, True, True, 0)
         bar.pack_end(self._button("×", "退出色卡（可从应用菜单重新打开）", self.quit_card), False, False, 0)
         bar.pack_end(self._button("›", "收起到屏幕边缘 · Esc", self.collapse), False, False, 0)
-        self.edit_button = self._button("编辑", "编辑内容和主题 · Ctrl+E", self.edit)
+        self.edit_button = self._button("设置", "标题、主题和色卡内容", self.open_settings)
         bar.pack_end(self.edit_button, False, False, 0)
         header.add(bar)
         self._bind_drag(header, "panel")
         self.drag_header = header
         root.pack_start(header, False, False, 0)
+        mode_bar = Gtk.Box(spacing=8)
+        mode_bar.set_margin_start(14)
+        mode_bar.set_margin_end(14)
+        mode_bar.set_margin_bottom(6)
+        self.mode_combo = Gtk.ComboBoxText()
+        self.mode_combo.append("markdown", "Markdown 便签")
+        self.mode_combo.append("palette", "颜色卡片")
+        self.mode_combo.set_active_id(self.settings.content_mode)
+        self.mode_combo.connect("changed", self._mode_changed)
+        mode_bar.pack_start(self.mode_combo, True, True, 0)
+        root.pack_start(mode_bar, False, False, 0)
+        self.markdown_pane = None
+        self.scroll = None
+        if self.settings.content_mode == "markdown":
+            self.markdown_pane = MarkdownPane(
+                self.settings.markdown, theme_colors(self.settings.background, self.settings.accent), self._save_markdown)
+            self.markdown_pane.stack.set_size_request(-1, max(100, min(360, self.workarea().height - 300)))
+            root.pack_start(self.markdown_pane, True, True, 0)
+        else:
+            self.scroll = Gtk.ScrolledWindow()
+            self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            self.scroll.set_propagate_natural_height(True)
+            self.scroll.set_max_content_height(max(100, self.workarea().height - 200))
+            self.scroll.add(self._palette_content())
+            root.pack_start(self.scroll, True, True, 0)
+        footer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        footer.get_style_context().add_class("footer")
+        self.auto_toggle = Gtk.CheckButton(label="离开后自动收起")
+        self.auto_toggle.set_tooltip_text("编辑 Markdown 时暂不自动收起")
+        self.auto_toggle.set_active(self.settings.auto_hide)
+        self.auto_toggle.connect("toggled", self._auto_toggled)
+        footer.pack_start(self.auto_toggle, False, False, 0)
+        footer.pack_start(label("始终置顶 · 拖标题贴边 · 点色签展开", "hint"), False, False, 0)
+        root.pack_start(footer, False, False, 0)
+
+    def _palette_content(self):
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         for category in self.settings.notes:
             row = Gtk.Box(spacing=10)
@@ -239,20 +284,57 @@ class ColorCard(Gtk.Application):
             rules = label(self.settings.guidance, "rules", wrap=True)
             rules.set_max_width_chars(36)
             content.pack_start(rules, False, False, 0)
-        self.scroll = Gtk.ScrolledWindow()
-        self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.scroll.set_propagate_natural_height(True)
-        self.scroll.set_max_content_height(max(180, self.workarea().height - 150))
-        self.scroll.add(content)
-        root.pack_start(self.scroll, True, True, 0)
-        footer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        footer.get_style_context().add_class("footer")
-        self.auto_toggle = Gtk.CheckButton(label="离开后自动收起")
-        self.auto_toggle.set_active(self.settings.auto_hide)
-        self.auto_toggle.connect("toggled", self._auto_toggled)
-        footer.pack_start(self.auto_toggle, False, False, 0)
-        footer.pack_start(label("始终置顶 · 拖标题贴边 · 点色签或向内拖动展开", "hint"), False, False, 0)
-        root.pack_start(footer, False, False, 0)
+        return content
+
+    def _panel_width(self):
+        return min(440, self.workarea().width - 20) if self.settings.content_mode == "markdown" else 354
+
+    def _save_markdown(self, text):
+        updated = replace(self.settings, markdown=text)
+        try:
+            self.store.save(updated)
+        except (OSError, ValueError) as error:
+            return str(error)
+        self.settings = updated
+        return None
+
+    def _flush_markdown(self):
+        return self.markdown_pane is None or self.markdown_pane.save_now()
+
+    def _rebuild(self):
+        self.panel.get_child().destroy()
+        self.tab.get_child().destroy()
+        self._build_panel()
+        self._build_tab()
+        self.panel.show_all()
+        self.tab.hide()
+        self.panel.resize(self._panel_width(), 1)
+        self._mapped()
+
+    def _mode_changed(self, combo):
+        if self._changing_mode:
+            return
+        mode = combo.get_active_id()
+        if mode == self.settings.content_mode:
+            return
+        updated = replace(self.settings, content_mode=mode)
+        success = self._flush_markdown()
+        if success:
+            # Autosave may have replaced self.settings during the flush.
+            updated = replace(self.settings, content_mode=mode)
+            try:
+                self.store.save(updated)
+            except (OSError, ValueError) as error:
+                success = False
+                if self.markdown_pane:
+                    self.markdown_pane.message("无法切换：" + str(error))
+        if not success:
+            self._changing_mode = True
+            combo.set_active_id(self.settings.content_mode)
+            self._changing_mode = False
+            return
+        self.settings = updated
+        self._rebuild()
 
     def _build_tab(self):
         tab = Gtk.EventBox()
@@ -263,8 +345,9 @@ class ColorCard(Gtk.Application):
         title = label("便\n签", "pull-title")
         title.set_xalign(0.5)
         column.pack_start(title, False, False, 0)
-        for category in self.settings.notes[:8]:
-            dot = swatch(category.color, 12, 3)
+        colors = [note.color for note in self.settings.notes[:8]] if self.settings.content_mode == "palette" else [self.settings.accent]
+        for color in colors:
+            dot = swatch(color, 12, 3 if self.settings.content_mode == "palette" else 20)
             dot.set_halign(Gtk.Align.CENTER)
             column.pack_start(dot, False, False, 0)
         self.arrow = label("‹", "pull-arrow")
@@ -282,8 +365,18 @@ class ColorCard(Gtk.Application):
         self.css_provider.load_from_data(CSS.substitute(colors).encode("utf-8"))
 
     def edit(self):
+        if self.settings.content_mode == "markdown":
+            self.expand()
+            self.markdown_pane.set_editing(True)
+            self.panel.present()
+        else:
+            self.open_settings()
+
+    def open_settings(self):
         if self.editor is not None:
             self.editor.present()
+            return
+        if not self._flush_markdown():
             return
         self.expand()
         self.editor = NoteEditor(self.panel, self.settings)
@@ -294,6 +387,9 @@ class ColorCard(Gtk.Application):
 
     def _editor_response(self, editor, response):
         if response == Gtk.ResponseType.OK:
+            if not self._flush_markdown():
+                editor.show_error("便签尚未保存，请先保存或导出当前草稿。")
+                return
             try:
                 updated = editor.read_settings(self.settings)
                 self.store.save(updated)
@@ -302,14 +398,7 @@ class ColorCard(Gtk.Application):
                 return
             self.settings = updated
             self._apply_theme()
-            self.panel.get_child().destroy()
-            self.tab.get_child().destroy()
-            self._build_panel()
-            self._build_tab()
-            self.panel.show_all()
-            self.tab.hide()
-            self.panel.resize(354, 1)
-            self._mapped()
+            self._rebuild()
         editor.destroy()
 
     def _editor_destroyed(self, *_):
@@ -341,7 +430,10 @@ class ColorCard(Gtk.Application):
         if self.panel is None:
             return
         area = self.workarea()
-        self.scroll.set_max_content_height(max(180, area.height - 150))
+        if self.scroll is not None:
+            self.scroll.set_max_content_height(max(100, area.height - 200))
+        if self.markdown_pane is not None:
+            self.markdown_pane.stack.set_size_request(-1, max(100, min(360, area.height - 300)))
         self.panel.move(*dock_position(area, tuple(self.panel.get_size()),
                                       self.settings.side, self.settings.y_fraction))
         self.tab.move(*handle_position(area, tuple(self.panel.get_size()),
@@ -391,6 +483,8 @@ class ColorCard(Gtk.Application):
     def collapse(self):
         if self.editor is not None:
             return False
+        if not self._flush_markdown():
+            return False
         self._cancel_hover()
         self._cancel_hide()
         self.settings.collapsed = True
@@ -421,7 +515,8 @@ class ColorCard(Gtk.Application):
 
     def _maybe_hide(self):
         self.hide_timer = None
-        if self.drag or self.editor is not None or not self.settings.auto_hide:
+        if (self.drag or self.editor is not None or not self.settings.auto_hide or
+                (self.markdown_pane is not None and (self.markdown_pane.editing or self.markdown_pane.file_dialog))):
             return False
         pointer = Gdk.Display.get_default().get_default_seat().get_pointer()
         _, x, y = pointer.get_position()
@@ -508,9 +603,15 @@ class ColorCard(Gtk.Application):
         if event.state & Gdk.ModifierType.CONTROL_MASK and event.keyval in (Gdk.KEY_e, Gdk.KEY_E):
             self.edit()
             return True
+        if event.state & Gdk.ModifierType.CONTROL_MASK and event.keyval in (Gdk.KEY_s, Gdk.KEY_S):
+            self._flush_markdown()
+            return True
         return False
 
     def quit_card(self):
+        if not self._flush_markdown():
+            self.panel.present()
+            return False
         if self.editor is not None:
             self.editor.destroy()
         self._cancel_hide()
@@ -530,7 +631,7 @@ class ColorCard(Gtk.Application):
     def _smoke_expanded(self):
         try:
             self._check("expanded panel visible", self.panel.get_visible() and not self.tab.get_visible())
-            self._check("all eight default color rows", len(self.settings.notes) == 8)
+            self._check("eight default color entries preserved", len(self.settings.notes) == 8)
             self._check("fits monitor", self.panel.get_size()[1] <= self.workarea().height)
             expected = dock_position(self.workarea(), tuple(self.panel.get_size()),
                                      self.settings.side, self.settings.y_fraction)
