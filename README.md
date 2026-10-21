@@ -25,7 +25,7 @@ A small, offline GTK 3 floating Markdown note for Linux X11. Write your own note
 Ubuntu / Debian 可准备以下依赖（命令只安装运行库，项目本身不改系统设置）：
 
 ```sh
-sudo apt install git python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-venv
+sudo apt install git python3-gi python3-gi-cairo gir1.2-gtk-3.0 librsvg2-common python3-venv
 
 git clone https://github.com/wcycn/paper-color-card.git
 cd paper-color-card
@@ -34,7 +34,7 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/python launch.py
 ```
 
-GTK / PyGObject 通过系统包提供，Markdown 解析依赖见 [requirements.txt](requirements.txt)。如果你的 Python 已有全部依赖，可直接运行 `python3 launch.py`。
+GTK / PyGObject 通过系统包提供，`librsvg2-common` 提供 SVG 图标加载支持，Markdown 解析依赖见 [requirements.txt](requirements.txt)。如果你的 Python 已有全部依赖，可直接运行 `python3 launch.py`。
 
 需要应用菜单入口时运行：
 
