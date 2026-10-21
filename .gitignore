@@ -10,4 +10,5 @@ htmlcov/
 *.log
 *.bak
 settings.json
+settings.*.json
 settings.*.tmp

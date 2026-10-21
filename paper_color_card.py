@@ -28,20 +28,36 @@ from markdown_view import MarkdownPane  # noqa: E402
 
 CSS = Template("""
 .color-card { background: transparent; font-family: 'Noto Sans CJK SC', sans-serif; }
-.card { background: $background; border: 1px solid $border; border-radius: 15px; }
-.heading { color: $ink; font-size: 16px; font-weight: 700; }
-.subheading { color: $muted; font-size: 11px; padding-bottom: 3px; }
+.card { background: $background; border: 1px solid $border; border-radius: 12px; }
+.heading { color: $ink; font-size: 17px; font-weight: 700; }
+.subheading { color: $subtle; font-size: 11px; padding-bottom: 3px; }
+.card button, .note-file-menu button {
+  background: transparent; background-image: none; color: $muted;
+  border: 1px solid transparent; border-radius: 6px;
+  box-shadow: none; text-shadow: none; padding: 4px 9px;
+  min-height: 22px; min-width: 20px; font-size: 11px;
+}
+.card button:hover, .note-file-menu button:hover { background: $hover; color: $ink; }
+.card button:focus, .note-file-menu button:focus {
+  outline-color: $muted; outline-style: solid; outline-width: 1px; outline-offset: -2px;
+}
+.card button:disabled { color: $subtle; opacity: .5; }
+.mode-selector button { padding-left: 0; }
+.mode-selector arrow { color: $subtle; min-width: 10px; min-height: 10px; }
+.view-switch { background: $soft; border-radius: 7px; padding: 2px; }
+.view-switch button { border-radius: 5px; padding: 2px 11px; }
+.view-switch button:checked { background: $row; color: $ink; border-color: $border; }
+.note-file-menu { background: $background; color: $ink; border-color: $border; }
 .icon-button { background: transparent; border: none; box-shadow: none;
   padding: 3px 7px; min-width: 17px; min-height: 20px; color: $muted; }
 .icon-button:hover { background: $hover; color: $ink; border-radius: 6px; }
-.legend { background: $row; border: 1px solid $border; border-radius: 9px;
-  padding: 7px 9px; margin: 0 12px 5px; }
+.legend { background: transparent; padding: 8px 4px; margin: 0 14px 3px; }
 .row-title { color: $ink; font-size: 13px; font-weight: 700; }
 .row-detail { color: $muted; font-size: 10.5px; }
 .color-name { color: $subtle; font-size: 10px; }
 .rules { background: $soft; border-radius: 9px; padding: 8px 10px;
   margin: 5px 12px 5px; color: $muted; font-size: 10px; }
-.footer { padding: 6px 14px 12px; }
+.footer { padding: 9px 18px 14px; }
 .footer label { color: $muted; font-size: 10px; }
 .footer check { background: $row; border: 1px solid $border; border-radius: 3px;
   min-width: 13px; min-height: 13px; }
@@ -53,10 +69,14 @@ CSS = Template("""
 .pull-title { font-size: 11px; color: $accent_ink; font-weight: 700; }
 .pull-arrow { font-size: 13px; color: $accent_ink; }
 .markdown-source, .markdown-preview { background: $background; color: $ink; }
-.markdown-source text { background: $row; color: $ink; font-family: monospace; font-size: 12px; }
-.markdown-preview text { background: $background; color: $ink; font-size: 13px; }
+.markdown-source text { background: $background; color: $ink; font-family: monospace; font-size: 12px; }
+.markdown-preview text { background: $background; color: $ink; font-size: 14px; }
+.markdown-source, .markdown-preview { caret-color: $ink; }
+.card scrollbar { background: transparent; }
+.card scrollbar slider { background: $border; border-radius: 8px; min-width: 4px; min-height: 4px; }
 .markdown-status { color: $muted; font-size: 10px; }
-.markdown-format { padding: 2px 6px; min-width: 18px; }
+.format-toolbar { border-bottom: 1px solid $border; padding-bottom: 5px; }
+.card .markdown-format { padding: 2px 6px; min-width: 18px; }
 """)
 
 
@@ -190,10 +210,10 @@ class ColorCard(Gtk.Application):
         header.get_style_context().add_class("header")
         header.set_tooltip_text("拖动标题调整位置，松手后自动贴近左边或右边")
         bar = Gtk.Box(spacing=4)
-        bar.set_margin_start(14)
+        bar.set_margin_start(18)
         bar.set_margin_end(14)
-        bar.set_margin_top(13)
-        bar.set_margin_bottom(7)
+        bar.set_margin_top(16)
+        bar.set_margin_bottom(10)
         names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         heading = label(self.settings.title, "heading")
         heading.set_max_width_chars(13)
@@ -215,39 +235,46 @@ class ColorCard(Gtk.Application):
         self._bind_drag(header, "panel")
         self.drag_header = header
         root.pack_start(header, False, False, 0)
-        mode_bar = Gtk.Box(spacing=8)
-        mode_bar.set_margin_start(14)
-        mode_bar.set_margin_end(14)
-        mode_bar.set_margin_bottom(6)
         self.mode_combo = Gtk.ComboBoxText()
+        self.mode_combo.get_style_context().add_class("mode-selector")
+        self.mode_combo.set_tooltip_text("切换便签或色卡；两种模式分别保留内容")
+        self.mode_combo.get_accessible().set_name("内容模式")
         self.mode_combo.append("markdown", "Markdown 便签")
         self.mode_combo.append("palette", "颜色卡片")
         self.mode_combo.set_active_id(self.settings.content_mode)
         self.mode_combo.connect("changed", self._mode_changed)
-        mode_bar.pack_start(self.mode_combo, True, True, 0)
-        root.pack_start(mode_bar, False, False, 0)
         self.markdown_pane = None
         self.scroll = None
         if self.settings.content_mode == "markdown":
             self.markdown_pane = MarkdownPane(
                 self.settings.markdown, theme_colors(self.settings.background, self.settings.accent), self._save_markdown)
+            self.markdown_pane.toolbar.pack_start(self.mode_combo, True, True, 0)
+            self.markdown_pane.toolbar.reorder_child(self.mode_combo, 0)
+            self.markdown_pane.file_menu.connect("closed", lambda *_: self._queue_auto_hide())
             self.markdown_pane.stack.set_size_request(-1, max(100, min(360, self.workarea().height - 300)))
             root.pack_start(self.markdown_pane, True, True, 0)
         else:
+            mode_bar = Gtk.Box()
+            mode_bar.set_margin_start(18)
+            mode_bar.set_margin_end(18)
+            mode_bar.set_margin_bottom(6)
+            mode_bar.pack_start(self.mode_combo, False, False, 0)
+            root.pack_start(mode_bar, False, False, 0)
             self.scroll = Gtk.ScrolledWindow()
             self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
             self.scroll.set_propagate_natural_height(True)
             self.scroll.set_max_content_height(max(100, self.workarea().height - 200))
             self.scroll.add(self._palette_content())
             root.pack_start(self.scroll, True, True, 0)
-        footer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        footer = Gtk.Box(spacing=8)
         footer.get_style_context().add_class("footer")
+        footer.set_tooltip_text("始终置顶 · 拖动标题贴边 · 点击或悬停色签展开")
         self.auto_toggle = Gtk.CheckButton(label="离开后自动收起")
         self.auto_toggle.set_tooltip_text("编辑 Markdown 时暂不自动收起")
         self.auto_toggle.set_active(self.settings.auto_hide)
         self.auto_toggle.connect("toggled", self._auto_toggled)
         footer.pack_start(self.auto_toggle, False, False, 0)
-        footer.pack_start(label("始终置顶 · 拖标题贴边 · 点色签展开", "hint"), False, False, 0)
+        footer.pack_end(label("Esc 收起", "hint"), False, False, 0)
         root.pack_start(footer, False, False, 0)
 
     def _palette_content(self):
@@ -275,7 +302,7 @@ class ColorCard(Gtk.Application):
             row.pack_start(text, True, True, 0)
             content.pack_start(row, False, False, 0)
         if not self.settings.notes:
-            empty = label("还没有提示，点击右上角「编辑」添加内容。", "row-detail", wrap=True)
+            empty = label("还没有提示，点击右上角「设置」添加内容。", "row-detail", wrap=True)
             empty.set_margin_start(14)
             empty.set_margin_end(14)
             empty.set_margin_bottom(14)
@@ -516,7 +543,8 @@ class ColorCard(Gtk.Application):
     def _maybe_hide(self):
         self.hide_timer = None
         if (self.drag or self.editor is not None or not self.settings.auto_hide or
-                (self.markdown_pane is not None and (self.markdown_pane.editing or self.markdown_pane.file_dialog))):
+                (self.markdown_pane is not None and (self.markdown_pane.editing or
+                 self.markdown_pane.file_dialog or self.markdown_pane.file_button.get_active()))):
             return False
         pointer = Gdk.Display.get_default().get_default_seat().get_pointer()
         _, x, y = pointer.get_position()

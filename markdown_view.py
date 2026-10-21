@@ -27,24 +27,44 @@ class MarkdownPane(Gtk.Box):
         self.links = []
         self._switching_view = False
 
-        bar = Gtk.Box(spacing=4)
-        bar.set_margin_start(12)
-        bar.set_margin_end(12)
+        self.toolbar = bar = Gtk.Box(spacing=8)
+        bar.set_margin_start(18)
+        bar.set_margin_end(18)
+        bar.set_margin_bottom(4)
+        switch = Gtk.Box()
+        switch.get_style_context().add_class("view-switch")
         self.edit_button = Gtk.ToggleButton(label="编辑")
         self.preview_button = Gtk.ToggleButton(label="预览")
+        self.edit_button.set_tooltip_text("编辑 Markdown · Ctrl+E")
+        self.preview_button.set_tooltip_text("预览排版，正文可选择复制")
         self.edit_button.connect("clicked", lambda *_: self.set_editing(True))
         self.preview_button.connect("clicked", lambda *_: self.set_editing(False))
-        bar.pack_start(self.edit_button, False, False, 0)
-        bar.pack_start(self.preview_button, False, False, 0)
-        for text, callback in (("导出", lambda: self._choose_file(False)), ("导入", lambda: self._choose_file(True))):
+        switch.pack_start(self.edit_button, False, False, 0)
+        switch.pack_start(self.preview_button, False, False, 0)
+        bar.pack_start(switch, False, False, 0)
+        self.file_button = Gtk.MenuButton(label="文件")
+        self.file_button.set_tooltip_text("导入或导出 Markdown 文件")
+        self.file_menu = Gtk.Popover.new(self.file_button)
+        self.file_menu.get_style_context().add_class("note-file-menu")
+        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        menu.set_border_width(6)
+        self.file_actions = {}
+        for text, importing in (("导入 Markdown…", True), ("导出 Markdown…", False)):
             button = Gtk.Button(label=text)
-            button.connect("clicked", lambda _button, fn=callback: fn())
-            bar.pack_end(button, False, False, 0)
+            button.set_halign(Gtk.Align.FILL)
+            button.connect("clicked", lambda _button, value=importing: self._file_action(value))
+            menu.pack_start(button, False, False, 0)
+            self.file_actions[importing] = button
+        self.file_menu.add(menu)
+        menu.show_all()
+        self.file_button.set_popover(self.file_menu)
+        bar.pack_end(self.file_button, False, False, 0)
         self.pack_start(bar, False, False, 0)
 
         self.format_bar = Gtk.Box(spacing=3)
-        self.format_bar.set_margin_start(12)
-        self.format_bar.set_margin_end(12)
+        self.format_bar.get_style_context().add_class("format-toolbar")
+        self.format_bar.set_margin_start(18)
+        self.format_bar.set_margin_end(18)
         self.format_bar.set_no_show_all(True)
         actions = (
             ("H", "插入标题", lambda: self.prefix_line("## ")),
@@ -85,12 +105,12 @@ class MarkdownPane(Gtk.Box):
         self.preview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.preview_buffer = self.preview.get_buffer()
         for view in (self.source, self.preview):
-            view.set_left_margin(14)
-            view.set_right_margin(14)
-            view.set_top_margin(8)
-            view.set_bottom_margin(12)
-            view.set_pixels_above_lines(2)
-            view.set_pixels_below_lines(2)
+            view.set_left_margin(20)
+            view.set_right_margin(20)
+            view.set_top_margin(10)
+            view.set_bottom_margin(16)
+            view.set_pixels_above_lines(1)
+            view.set_pixels_below_lines(3)
         self.preview.connect("button-release-event", self._open_link)
         self.preview.set_has_tooltip(True)
         self.preview.connect("query-tooltip", self._link_tooltip)
@@ -105,8 +125,9 @@ class MarkdownPane(Gtk.Box):
         self.status = Gtk.Label(label="内容自动保存 · Ctrl+S 保存", xalign=0)
         self.status.set_ellipsize(Pango.EllipsizeMode.END)
         self.status.get_style_context().add_class("markdown-status")
-        self.status.set_margin_start(14)
-        self.status.set_margin_end(14)
+        self.status.set_margin_start(20)
+        self.status.set_margin_end(20)
+        self.status.set_margin_top(4)
         self.pack_start(self.status, False, False, 0)
         self._setup_tags(colors)
         self.render()
@@ -281,6 +302,10 @@ class MarkdownPane(Gtk.Box):
     def export_file(self, path):
         write_markdown_file(Path(path), self.text())
         self.message("已导出 Markdown 文件")
+
+    def _file_action(self, importing):
+        self.file_menu.popdown()
+        self._choose_file(importing)
 
     def _choose_file(self, importing):
         self.file_dialog = Gtk.FileChooserDialog(

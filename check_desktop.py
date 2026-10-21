@@ -414,6 +414,29 @@ class DesktopChecks:
         pane = self.app.markdown_pane
         self.check('fresh note starts in Markdown preview', pane is not None and not pane.editing)
         self.check('loaded document reaches the native editor unchanged', pane.text() == self.app.settings.markdown)
+        self.app.auto_toggle.set_active(True)
+        self.input.click(pane.file_button)
+        yield 180
+        self.check('file menu opens from a real click', pane.file_menu.get_visible())
+        self.capture('markdown-menu')
+        self.input.move(*self.app.workarea().center)
+        self.app._queue_auto_hide()
+        yield 900
+        self.check('auto-hide does not interrupt the file menu', self.app.panel.get_visible() and not self.app.settings.collapsed)
+        for importing in (True, False):
+            if not pane.file_button.get_active():
+                self.input.click(pane.file_button)
+                yield 180
+            self.input.click(pane.file_actions[importing])
+            yield 200
+            action = Gtk.FileChooserAction.OPEN if importing else Gtk.FileChooserAction.SAVE
+            self.check(('import' if importing else 'export') + ' menu opens the native file chooser',
+                       pane.file_dialog is not None and pane.file_dialog.get_action() == action)
+            self.input.click(pane.file_dialog.get_widget_for_response(Gtk.ResponseType.CANCEL))
+            yield 180
+            self.check('canceling file exchange preserves the document', pane.file_dialog is None and
+                       pane.text() == self.app.settings.markdown)
+        self.app.auto_toggle.set_active(False)
         self.input.click(pane.edit_button)
         yield 180
         self.check('Markdown edit button opens the source editor', pane.editing and pane.source.has_focus())
